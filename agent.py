@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -38,11 +39,16 @@ def run_once(symbol: str):
         "latest_close": bars[-1]["close"],
     }
     os.makedirs("logs", exist_ok=True)
-    with open(LOG_PATH, "a") as f:
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_entry) + "\n")
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
     parser = argparse.ArgumentParser(description="Simple AI trading agent (Alpaca paper trading)")
     parser.add_argument("--symbol", default="AAPL", help="Stock ticker to trade")
     parser.add_argument("--loop", type=int, default=0, help="Seconds between runs. 0 = run once and exit.")

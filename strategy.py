@@ -77,4 +77,11 @@ Respond with ONLY valid JSON, no other text, in this exact shape:
     except json.JSONDecodeError:
         decision = {"action": "HOLD", "reason": f"Could not parse LLM output: {text[:100]}", "confidence": 0.0}
 
+    if not isinstance(decision, dict) or decision.get("action") not in ("BUY", "SELL", "HOLD"):
+        decision = {
+            "action": "HOLD",
+            "reason": f"The model returned unexpected output: {text[:100]}",
+            "confidence": 0.0,
+        }
+
     return decision

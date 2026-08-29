@@ -12,7 +12,7 @@ class Config:
 
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")
     LLM_API_KEY = os.getenv("LLM_API_KEY")
-    LLM_MODEL = os.getenv("LLM_MODEL", "meta/llama-3.3-70b-instruct")
+    LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
     _PLACEHOLDER_MARKERS = ("your_", "_here", "changeme", "xxx", "example")
