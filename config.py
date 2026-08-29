@@ -15,17 +15,26 @@ class Config:
     LLM_MODEL = os.getenv("LLM_MODEL", "meta/llama-3.3-70b-instruct")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
+    _PLACEHOLDER_MARKERS = ("your_", "_here", "changeme", "xxx", "example")
+
+    @classmethod
+    def _is_placeholder(cls, value) -> bool:
+        if not value:
+            return True
+        v = str(value).strip().lower()
+        return any(marker in v for marker in cls._PLACEHOLDER_MARKERS)
+
     @classmethod
     def validate(cls):
-        missing = [
-            name for name, val in [
-                ("ALPACA_API_KEY", cls.ALPACA_API_KEY),
-                ("ALPACA_SECRET_KEY", cls.ALPACA_SECRET_KEY),
-                ("LLM_API_KEY", cls.LLM_API_KEY),
-            ] if not val
-        ]
+        needed = {
+            "ALPACA_API_KEY": "Add your Alpaca paper API key (sign up at alpaca.markets).",
+            "ALPACA_SECRET_KEY": "Add your Alpaca paper secret key.",
+            "LLM_API_KEY": "Add your LLM API key (NVIDIA NIM or OpenAI) so the agent can decide.",
+        }
+        missing = [name for name in needed if cls._is_placeholder(getattr(cls, name))]
         if missing:
-            raise ValueError(
-                f"Missing required .env values: {', '.join(missing)}. "
-                "Copy .env.example to .env and fill them in."
-            )
+            lines = ["[config] Missing or placeholder .env value(s): " + ", ".join(missing) + "."]
+            for name in missing:
+                lines.append(f"  - {name}: {needed[name]}")
+            lines.append("Edit .env (copy .env.example to .env if you haven't).")
+            raise SystemExit("\n".join(lines))
