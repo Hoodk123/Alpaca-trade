@@ -1,8 +1,12 @@
 """Turns price bars into a BUY/SELL/HOLD decision using simple indicators + an LLM."""
 import json
+import time
 import requests
 
 from config import Config
+
+MAX_ATTEMPTS = 2
+RETRY_DELAY_SECONDS = 8  # free NIM tier throttles hard, so back off longer between retries
 
 
 def sma(values, window):
@@ -22,18 +26,8 @@ def build_summary(bars):
     }
 
 
-def decide(symbol: str, bars: list) -> dict:
-    """Returns {"action": "BUY"|"SELL"|"HOLD", "reason": str, "confidence": float}"""
-    summary = build_summary(bars)
-
-    prompt = f"""You are a cautious trading assistant operating on a PAPER (simulated) account.
-Symbol: {symbol}
-Recent data: {json.dumps(summary)}
-
-Based only on this data, decide one action: BUY, SELL, or HOLD.
-Respond with ONLY valid JSON, no other text, in this exact shape:
-{{"action": "BUY|SELL|HOLD", "reason": "one short sentence", "confidence": 0.0-1.0}}"""
-
+def _call_llm_once(prompt: str):
+    """One attempt at calling the LLM. Returns (text_or_None, hold_reason_or_None)."""
     try:
         response = requests.post(
             f"{Config.LLM_BASE_URL}/chat/completions",
@@ -42,15 +36,20 @@ Respond with ONLY valid JSON, no other text, in this exact shape:
                 "model": Config.LLM_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.2,
-                "max_tokens": 200,
+                "max_tokens": 500,
             },
-            timeout=30,
+            timeout=120,
         )
-        response.raise_for_status()
     except requests.exceptions.Timeout:
-        reason = "LLM request timed out after 30s"
-        print(f"  [strategy] {reason} - holding.")
-        return {"action": "HOLD", "reason": reason, "confidence": 0.0}
+        return None, "LLM request timed out after 120s"
+    except requests.exceptions.RequestException as e:
+        return None, f"Could not reach the LLM provider: {e}"
+
+    if response.status_code == 429:
+        return None, "rate limited (HTTP 429) — back off and retry"
+
+    try:
+        response.raise_for_status()
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else "?"
         reason = f"LLM provider rejected the request (HTTP {status})"
@@ -60,14 +59,62 @@ Respond with ONLY valid JSON, no other text, in this exact shape:
             reason += " - check LLM_MODEL and LLM_BASE_URL in .env"
         else:
             reason += " - check LLM_BASE_URL in .env"
-        print(f"  [strategy] {reason} (holding).")
-        return {"action": "HOLD", "reason": reason, "confidence": 0.0}
-    except requests.exceptions.RequestException as e:
-        reason = f"Could not reach the LLM provider: {e}"
-        print(f"  [strategy] {reason} (holding).")
-        return {"action": "HOLD", "reason": reason, "confidence": 0.0}
+        return None, reason
 
-    text = response.json()["choices"][0]["message"]["content"].strip()
+    body = response.json()
+    choices = body.get("choices") or []
+    content = choices[0].get("message", {}).get("content") if choices else None
+    finish = choices[0].get("finish_reason") if choices else None
+
+    if finish == "length":
+        return None, "LLM output truncated (increase max_tokens)"
+
+    if not content:
+        return None, "LLM returned an empty response — will retry"
+
+    return content.strip(), None
+
+
+def decide(symbol: str, bars: list, position_qty: int = 0) -> dict:
+    """Returns {"action": "BUY"|"SELL"|"HOLD", "reason": str, "confidence": float}
+
+    `position_qty` is how many shares we currently hold (0 = none). The model is
+    told this so it never suggests SELL for a stock we don't own."""
+    summary = build_summary(bars)
+
+    position_line = (
+        f"Current position: you hold {position_qty} shares of {symbol}."
+        if position_qty > 0
+        else f"Current position: you hold NO shares of {symbol}."
+    )
+
+    prompt = f"""You are a cautious trading assistant operating on a PAPER (simulated) account.
+Symbol: {symbol}
+{position_line}
+Recent data: {json.dumps(summary)}
+
+IMPORTANT:
+- SELL is only valid when you currently hold shares of {symbol}.
+- If you hold NO shares, you MUST NOT choose SELL (pick BUY or HOLD).
+- BUY is only valid when the setup is actually attractive.
+
+Based only on this data, decide one action: BUY, SELL, or HOLD.
+Respond with ONLY valid JSON, no other text, in this exact shape:
+{{"action": "BUY|SELL|HOLD", "reason": "one short sentence", "confidence": 0.0-1.0}}"""
+
+    text, last_reason = None, None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        text, last_reason = _call_llm_once(prompt)
+        if text:
+            break
+        if attempt < MAX_ATTEMPTS:
+            wait = min(RETRY_DELAY_SECONDS * attempt, 20)
+            print(f"  [strategy] {symbol}: {last_reason} (attempt {attempt}/{MAX_ATTEMPTS}, retrying in {wait}s)")
+            time.sleep(wait)
+
+    if not text:
+        print(f"  [strategy] {symbol}: giving up after {MAX_ATTEMPTS} attempts - holding.")
+        return {"action": "HOLD", "reason": last_reason or "no response from LLM", "confidence": 0.0}
 
     # Strip markdown fences if the model added them anyway
     text = text.replace("```json", "").replace("```", "").strip()

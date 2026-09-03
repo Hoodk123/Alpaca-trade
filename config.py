@@ -15,6 +15,17 @@ class Config:
     LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
+    # Default watchlist of large, liquid names — good signal-to-noise for a demo.
+    # TSM = TSMC's US-listed ADR (there's no separate "TSMC" ticker on US exchanges).
+    DEFAULT_WATCHLIST = ["AAPL", "MSFT", "NVDA", "GOOGL", "TSM", "AMZN"]
+
+    # Only place an order if the LLM's confidence is at least this high.
+    # Below this, the symbol still shows up in the recommendation table as watch-only.
+    MIN_CONFIDENCE_TO_TRADE = 0.6
+
+    # Max % of paper cash to risk on a single BUY (simple position sizing).
+    MAX_CASH_PCT_PER_TRADE = 0.05
+
     _PLACEHOLDER_MARKERS = ("your_", "_here", "changeme", "xxx", "example")
 
     @classmethod
