@@ -9,6 +9,7 @@ __pycache__/
 
 # App data
 logs/
+dashboard.html
 
 # OS / editor
 .DS_Store

@@ -1,6 +1,8 @@
 """Turns price bars into a BUY/SELL/HOLD decision using simple indicators + an LLM."""
 import json
 import time
+from datetime import datetime, timezone
+
 import requests
 
 from config import Config
@@ -75,11 +77,35 @@ def _call_llm_once(prompt: str):
     return content.strip(), None
 
 
-def decide(symbol: str, bars: list, position_qty: int = 0) -> dict:
+def age_minutes(price_as_of) -> int:
+    """How old (in whole minutes) the given ISO timestamp is right now, vs UTC now."""
+    try:
+        as_of = datetime.fromisoformat(price_as_of)
+    except (TypeError, ValueError):
+        return -1  # unknown age
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return max(0, int((now - as_of).total_seconds() // 60))
+
+
+def _market_line(market_open: bool) -> str:
+    if market_open:
+        return "Market status: OPEN."
+    return "Market status: CLOSED — this is the last traded price before close, not a live quote."
+
+
+def decide(symbol: str, bars: list, position_qty: int = 0,
+           price_as_of=None, market_open: bool = True) -> dict:
     """Returns {"action": "BUY"|"SELL"|"HOLD", "reason": str, "confidence": float}
 
     `position_qty` is how many shares we currently hold (0 = none). The model is
-    told this so it never suggests SELL for a stock we don't own."""
+    told this so it never suggests SELL for a stock we don't own.
+
+    `price_as_of` is the ISO timestamp of the live price and `market_open` tells
+    the model whether the market is currently trading, so it can factor staleness
+    into its confidence.
+    """
     summary = build_summary(bars)
 
     position_line = (
@@ -88,15 +114,32 @@ def decide(symbol: str, bars: list, position_qty: int = 0) -> dict:
         else f"Current position: you hold NO shares of {symbol}."
     )
 
+    if price_as_of:
+        age = age_minutes(price_as_of)
+        age_line = (
+            f"Live price timestamp: {price_as_of} ({age} minute(s) ago)."
+            if age >= 0
+            else f"Live price timestamp: {price_as_of}."
+        )
+    else:
+        age_line = "Live price timestamp: unknown."
+
+    market_line = _market_line(market_open)
+
     prompt = f"""You are a cautious trading assistant operating on a PAPER (simulated) account.
 Symbol: {symbol}
 {position_line}
+{age_line}
+{market_line}
 Recent data: {json.dumps(summary)}
 
 IMPORTANT:
 - SELL is only valid when you currently hold shares of {symbol}.
 - If you hold NO shares, you MUST NOT choose SELL (pick BUY or HOLD).
 - BUY is only valid when the setup is actually attractive.
+- If the market is CLOSED, treat the live price as a snapshot (last traded price
+  before close), NOT a live quote. Factor that staleness into your confidence —
+  lower your confidence when reasoning off stale or closed-market data.
 
 Based only on this data, decide one action: BUY, SELL, or HOLD.
 Respond with ONLY valid JSON, no other text, in this exact shape:
