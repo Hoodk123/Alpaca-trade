@@ -34,6 +34,6 @@ services:
       - key: LLM_MAX_TOKENS
         value: "1024"
       - key: LOOP_INTERVAL_SECONDS
-        value: "900"
+        value: "300"
       - key: TRADE_ON_SCAN
-        value: "false"   # keep the auto-scan demo in recommend-only mode by default
+        value: "true"   # keep the auto-scan demo in recommend-only mode by default
