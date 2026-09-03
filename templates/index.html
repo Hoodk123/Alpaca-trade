@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TradOX — Decision Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body data-poll="{{ poll_seconds }}" data-stale="{{ stale_minutes }}">
+<div class="wrap">
+  <header class="header">
+    <h1>TradOX — AI Trading Decision Dashboard</h1>
+    <div class="badge-row">
+      <span id="market-badge" class="badge badge-loading">Loading market…</span>
+      <span id="latest-decision" class="latest"></span>
+    </div>
+  </header>
+
+  <section class="summary-cards" id="summary-cards">
+    <div class="card"><div class="card-label">Total decisions</div><div class="card-value" id="stat-total">—</div></div>
+    <div class="card"><div class="card-label">Last BUY</div><div class="card-value" id="stat-last-buy">—</div></div>
+    <div class="card"><div class="card-label">Last SELL</div><div class="card-value" id="stat-last-sell">—</div></div>
+  </section>
+
+  <section class="table-section">
+    <h2>Decision Log <span class="muted">(auto-updating)</span></h2>
+    <div class="table-scroll">
+      <table id="decision-table">
+        <thead>
+          <tr>
+            <th>Decided at</th>
+            <th>Symbol</th>
+            <th>Action</th>
+            <th>Conf</th>
+            <th>Price</th>
+            <th>Market</th>
+            <th>Data age</th>
+            <th>Order</th>
+          </tr>
+        </thead>
+        <tbody id="decision-body">
+          <tr><td colspan="8" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <span>Stale threshold: &gt; {{ stale_minutes }} min while market open.</span>
+  </footer>
+</div>
+
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

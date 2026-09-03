@@ -4,8 +4,8 @@ Position-aware: won't try to sell shares you don't hold, and sizes BUYs
 off a % of your actual paper cash instead of a blind fixed quantity.
 """
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.common.exceptions import APIError
 
 from config import Config
@@ -22,6 +22,25 @@ def get_current_qty(client, symbol: str) -> int:
         return int(float(position.qty))
     except APIError:
         return 0  # no position open
+
+
+def has_pending_order(client, symbol: str, side: OrderSide) -> bool:
+    """Whether there's already an open (unfilled) order for `symbol` on `side`.
+
+    Prevents duplicate order stacking: if a prior BUY/SELL is still in flight
+    (new/accepted/pending), we skip submitting another one for the same pair.
+    """
+    try:
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        orders = client.get_orders(req)
+    except APIError:
+        # Treat a lookup failure as "assume open order exists" would block trading;
+        # better to fail the check safely and let the order attempt happen.
+        return False
+    for order in orders:
+        if order.side == side:
+            return True
+    return False
 
 
 def calc_buy_qty(client, price: float) -> int:
@@ -49,6 +68,9 @@ def execute(symbol: str, action: str, latest_price: float):
         if qty <= 0:
             return None, "skipped BUY — insufficient cash for even 1 share"
         side = OrderSide.BUY
+
+    if has_pending_order(client, symbol, side):
+        return None, f"skipped {action} — order already pending for {symbol}"
 
     order = MarketOrderRequest(symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.DAY)
     result = client.submit_order(order)

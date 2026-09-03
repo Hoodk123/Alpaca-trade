@@ -9,7 +9,14 @@ __pycache__/
 
 # App data
 logs/
-dashboard.html
+market_state.json
+baseline.json
+
+# Render's filesystem is ephemeral: logs/, market_state.json, baseline.json and
+# any other generated local state reset on every redeploy. That's fine for a
+# hackathon demo (the trading agent just re-seeds its state), but any persistent
+# data you care about would need an external store (e.g. a database or object
+# storage) instead. See the README for how the app recreates these at runtime.
 
 # OS / editor
 .DS_Store

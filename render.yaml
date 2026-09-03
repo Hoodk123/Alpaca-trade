@@ -1,0 +1,39 @@
+# Render blueprint for the TradOX web service (Free instance).
+#
+# Connecting this repo to Render and creating a "Blueprint" from this file will
+# spin up a persistent web service. The envVars below are listed by NAME only —
+# Render will show each one as an empty field to fill in on the dashboard.
+#
+# The service uses Render's native Python buildpack (installs from
+# requirements.txt), so no Dockerfile is needed.
+services:
+  - type: web
+    name: tradox
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --timeout 120
+    envVars:
+      # --- Alpaca (paper trading) credentials ---
+      - key: ALPACA_API_KEY
+        sync: false          # no value -> shown as a field to fill in
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: ALPACA_PAPER
+        value: "true"
+
+      # --- LLM provider (NVIDIA NIM or OpenAI-compatible) ---
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: openai/gpt-oss-20b
+      - key: LLM_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+
+      # --- Optional tuning ---
+      - key: LLM_MAX_TOKENS
+        value: "1024"
+      - key: LOOP_INTERVAL_SECONDS
+        value: "900"
+      - key: TRADE_ON_SCAN
+        value: "false"   # keep the auto-scan demo in recommend-only mode by default

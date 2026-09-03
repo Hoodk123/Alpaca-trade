@@ -10,6 +10,59 @@ from config import Config
 MAX_ATTEMPTS = 2
 RETRY_DELAY_SECONDS = 8  # free NIM tier throttles hard, so back off longer between retries
 
+_COMPACT_RETRY_PROMPT = """Output ONLY a compact JSON object with no code fences and no
+other text, based on this data: {summary}
+Exact shape:
+{{"action": "BUY|SELL|HOLD", "reason": "short sentence under 25 words", "confidence": 0.0-1.0}}"""
+
+
+def _parse_decision(text):
+    """Turns raw LLM text into a normalized decision dict handle-or-fail.
+
+    Tries strict parse first, then salvages the first JSON object embedded in the
+    text (handles truncated trailing output / trailing boilerplate), then falls
+    back to a safe HOLD.
+    """
+    text = text.replace("```json", "").replace("```", "").strip()
+
+    def _valid(d):
+        return isinstance(d, dict) and d.get("action") in ("BUY", "SELL", "HOLD")
+
+    try:
+        decision = json.loads(text)
+        return decision if _valid(decision) else _bad(text, "unexpected shape")
+    except json.JSONDecodeError:
+        pass
+
+    # Salvage: scan for the outermost balanced {...} object and try to parse it.
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        decision = json.loads(candidate)
+                        if _valid(decision):
+                            return decision
+                    except json.JSONDecodeError:
+                        pass
+                    break
+
+    return _bad(text, "could not parse")
+
+
+def _bad(text, why):
+    return {
+        "action": "HOLD",
+        "reason": f"The model returned {why} output: {text[:100]}",
+        "confidence": 0.0,
+    }
+
 
 def sma(values, window):
     if len(values) < window:
@@ -29,7 +82,8 @@ def build_summary(bars):
 
 
 def _call_llm_once(prompt: str):
-    """One attempt at calling the LLM. Returns (text_or_None, hold_reason_or_None)."""
+    """One attempt at calling the LLM. Returns (text_or_None, error_or_None, was_truncated).
+    `was_truncated` is True when the output hit the token ceiling mid-response."""
     try:
         response = requests.post(
             f"{Config.LLM_BASE_URL}/chat/completions",
@@ -37,18 +91,18 @@ def _call_llm_once(prompt: str):
             json={
                 "model": Config.LLM_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.2,
-                "max_tokens": 500,
+                "temperature": 0.1,
+                "max_tokens": Config.LLM_MAX_TOKENS,
             },
             timeout=120,
         )
     except requests.exceptions.Timeout:
-        return None, "LLM request timed out after 120s"
+        return None, "LLM request timed out after 120s", False
     except requests.exceptions.RequestException as e:
-        return None, f"Could not reach the LLM provider: {e}"
+        return None, f"Could not reach the LLM provider: {e}", False
 
     if response.status_code == 429:
-        return None, "rate limited (HTTP 429) — back off and retry"
+        return None, "rate limited (HTTP 429) — back off and retry", False
 
     try:
         response.raise_for_status()
@@ -61,20 +115,17 @@ def _call_llm_once(prompt: str):
             reason += " - check LLM_MODEL and LLM_BASE_URL in .env"
         else:
             reason += " - check LLM_BASE_URL in .env"
-        return None, reason
+        return None, reason, False
 
     body = response.json()
     choices = body.get("choices") or []
     content = choices[0].get("message", {}).get("content") if choices else None
     finish = choices[0].get("finish_reason") if choices else None
 
-    if finish == "length":
-        return None, "LLM output truncated (increase max_tokens)"
-
     if not content:
-        return None, "LLM returned an empty response — will retry"
+        return None, "LLM returned an empty response — will retry", False
 
-    return content.strip(), None
+    return content.strip(), None, (finish == "length")
 
 
 def age_minutes(price_as_of) -> int:
@@ -141,37 +192,28 @@ IMPORTANT:
   before close), NOT a live quote. Factor that staleness into your confidence —
   lower your confidence when reasoning off stale or closed-market data.
 
-Based only on this data, decide one action: BUY, SELL, or HOLD.
-Respond with ONLY valid JSON, no other text, in this exact shape:
-{{"action": "BUY|SELL|HOLD", "reason": "one short sentence", "confidence": 0.0-1.0}}"""
+Respond with ONLY a compact JSON object and nothing else (no code fences, no
+explanation). Keep the "reason" under 25 words and make "confidence" a number
+between 0.0 and 1.0. Exact shape:
+{{"action": "BUY|SELL|HOLD", "reason": "short", "confidence": 0.0-1.0}}"""
 
     text, last_reason = None, None
+    truncated = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        text, last_reason = _call_llm_once(prompt)
+        text, last_reason, truncated = _call_llm_once(prompt)
         if text:
             break
         if attempt < MAX_ATTEMPTS:
             wait = min(RETRY_DELAY_SECONDS * attempt, 20)
             print(f"  [strategy] {symbol}: {last_reason} (attempt {attempt}/{MAX_ATTEMPTS}, retrying in {wait}s)")
             time.sleep(wait)
+            if truncated:
+                # If it was cut off, ask it to output the bare JSON this time.
+                prompt = _COMPACT_RETRY_PROMPT.format(summary=json.dumps(summary))
 
     if not text:
         print(f"  [strategy] {symbol}: giving up after {MAX_ATTEMPTS} attempts - holding.")
         return {"action": "HOLD", "reason": last_reason or "no response from LLM", "confidence": 0.0}
 
-    # Strip markdown fences if the model added them anyway
-    text = text.replace("```json", "").replace("```", "").strip()
-
-    try:
-        decision = json.loads(text)
-    except json.JSONDecodeError:
-        decision = {"action": "HOLD", "reason": f"Could not parse LLM output: {text[:100]}", "confidence": 0.0}
-
-    if not isinstance(decision, dict) or decision.get("action") not in ("BUY", "SELL", "HOLD"):
-        decision = {
-            "action": "HOLD",
-            "reason": f"The model returned unexpected output: {text[:100]}",
-            "confidence": 0.0,
-        }
-
+    decision = _parse_decision(text)
     return decision

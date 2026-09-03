@@ -14,6 +14,7 @@ class Config:
     LLM_API_KEY = os.getenv("LLM_API_KEY")
     LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
+    LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 
     # Default watchlist of large, liquid names — good signal-to-noise for a demo.
     # TSM = TSMC's US-listed ADR (there's no separate "TSMC" ticker on US exchanges).
