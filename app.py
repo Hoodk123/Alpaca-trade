@@ -48,6 +48,9 @@ LOOP_INTERVAL_SECONDS = int(os.getenv("LOOP_INTERVAL_SECONDS", "900"))
 # Keep the auto-scan in recommend-only mode by default (no paper orders) unless
 # TRADE_ON_SCAN=true is explicitly set.
 TRADE_ON_SCAN = os.getenv("TRADE_ON_SCAN", "false").lower() == "true"
+# How often (seconds) the background goal checker runs. It compares today's
+# Total Return % against the goal and auto-liquidates when reached.
+GOAL_CHECK_INTERVAL_SECONDS = max(10, int(os.getenv("GOAL_CHECK_INTERVAL_SECONDS", "60")))
 
 app = Flask(__name__)
 
@@ -187,6 +190,39 @@ def _returns(account: dict) -> dict:
         value = equity - baseline
         total = {"value": round(value, 2), "pct": round(value / baseline * 100.0, 3)}
     return {"total": total, "today": _today_pl(account)}
+
+
+def _check_goal():
+    """Auto-liquidate when today's Total Return % reaches the goal.
+
+    Runs periodically from the background scheduler. Skips when there is no
+    goal set, the goal is already achieved, it is a new day, or the agent is
+    paused. Fires once per day: it marks the goal achieved (persisted) then
+    sells every open position so the paper account locks in the return.
+    """
+    goal = agent.get_goal_state()
+    goal_pct = goal.get("goal_pct")
+    if goal_pct is None or goal.get("achieved"):
+        return
+    if goal.get("date") != datetime.now().strftime("%Y-%m-%d"):
+        return
+    if agent.is_paused():
+        return
+    try:
+        account = get_account_summary()
+    except Exception:
+        return
+    returns = _returns(account)
+    total_pct = returns["total"].get("pct")
+    if total_pct is None:
+        return
+    if total_pct >= goal_pct:
+        agent.mark_goal_achieved()
+        results = agent.liquidate_all()
+        print(f"[goal] reached {total_pct:.2f}% >= target {goal_pct}% - "
+              f"auto-liquidated {len(results)} position(s)")
+        for r in results:
+            print(f"[goal]   {r['symbol']}: {r['note']} (order {r.get('order_id')})")
 
 
 # --- routes ----------------------------------------------------------------
@@ -345,10 +381,18 @@ def _start_scheduler():
             id="tradox-scan",
             replace_existing=True,
         )
+        _scheduler.add_job(
+            _check_goal,
+            trigger="interval",
+            seconds=GOAL_CHECK_INTERVAL_SECONDS,
+            id="tradox-goal-check",
+            replace_existing=True,
+        )
         _scheduler.start()
         _scheduler_started = True
         mode = "TRADING" if TRADE_ON_SCAN else "recommend-only (watch)"
-        print(f"[app] background scan started: every {LOOP_INTERVAL_SECONDS}s, mode={mode}")
+        print(f"[app] background scan started: every {LOOP_INTERVAL_SECONDS}s, mode={mode}, "
+              f"goal check every {GOAL_CHECK_INTERVAL_SECONDS}s")
     except Exception as e:
         print(f"[app] could not start background scheduler: {e}")
 

@@ -136,7 +136,7 @@ function renderGoal(goal) {
     status.textContent = `Goal reached today (${goalPct}%) — positions closed.`;
     status.className = "goal-status achieved";
   } else {
-    status.textContent = `In progress — target ${goalPct}% return.`;
+    status.textContent = `In progress — auto-closes all positions when return hits ${goalPct}%.`;
     status.className = "goal-status";
   }
 }

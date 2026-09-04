@@ -321,6 +321,16 @@ def get_goal_state() -> dict:
     return _load_goal_state()
 
 
+def mark_goal_achieved() -> dict:
+    """Flag today's goal as achieved (persisted). Returns the state."""
+    state = _load_goal_state()
+    if state.get("goal_pct") is not None:
+        state["achieved"] = True
+        state["achieved_on"] = datetime.now().isoformat()
+        _save_goal_state(state)
+    return state
+
+
 def liquidate_all(trade_ok: bool = True):
     """Sells every open position (position-aware, pending-order safe).
 
