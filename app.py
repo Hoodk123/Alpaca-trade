@@ -193,7 +193,7 @@ def _returns(account: dict) -> dict:
 
 
 def _check_goal():
-    """Auto-liquidate when today's Total Return % reaches the goal.
+    """Auto-liquidate when today's P/L % reaches the goal.
 
     Runs periodically from the background scheduler. Skips when there is no
     goal set, the goal is already achieved, it is a new day, or the agent is
@@ -213,13 +213,13 @@ def _check_goal():
     except Exception:
         return
     returns = _returns(account)
-    total_pct = returns["total"].get("pct")
-    if total_pct is None:
+    today_pct = returns["today"].get("pct")
+    if today_pct is None:
         return
-    if total_pct >= goal_pct:
+    if today_pct >= goal_pct:
         agent.mark_goal_achieved()
         results = agent.liquidate_all()
-        print(f"[goal] reached {total_pct:.2f}% >= target {goal_pct}% - "
+        print(f"[goal] today's P/L {today_pct:+.2f}% >= target {goal_pct}% - "
               f"auto-liquidated {len(results)} position(s)")
         for r in results:
             print(f"[goal]   {r['symbol']}: {r['note']} (order {r.get('order_id')})")

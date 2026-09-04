@@ -421,8 +421,9 @@ function renderStatus(data) {
   if (!sectionEqual(data.paused, prev.paused)) renderAgent(!!data.paused);
 
   renderAccount(data.account, data.returns);
-  if (data.returns && data.returns.total && data.returns.total.pct != null) {
-    _lastReturnPct = data.returns.total.pct;
+  // Goal progress bar tracks today's P/L% (what the Goal of the Day targets).
+  if (data.returns && data.returns.today && data.returns.today.pct != null) {
+    _lastReturnPct = data.returns.today.pct;
   } else {
     _lastReturnPct = NaN;
   }
