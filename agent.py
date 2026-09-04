@@ -4,17 +4,36 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from config import Config
 from data_fetcher import get_recent_bars, get_latest_price, get_market_status
-from strategy import decide, age_minutes
-from broker import execute, get_client, get_current_qty
+from strategy import decide, age_minutes, build_summary
+from broker import execute, get_client, get_position_detail, liquidate_position, get_open_positions
 
 LOG_PATH = "logs/decisions.jsonl"
 MARKET_STATE_PATH = "market_state.json"
+
+# Paused flag (thread-safe): when paused, run_scan() returns before placing any
+# order, so trading (and the goal auto-liquidate) halts but scanning/logging
+# keep the dashboard data fresh. Defaults to Running.
+_paused = False
+_paused_lock = threading.Lock()
+
+
+def set_paused(paused: bool):
+    global _paused
+    with _paused_lock:
+        _paused = bool(paused)
+    return _paused
+
+
+def is_paused() -> bool:
+    with _paused_lock:
+        return _paused
 
 
 def _load_market_state():
@@ -43,9 +62,9 @@ def _notify_market_change(changed_to_open: bool):
     try:
         from plyer import notification
         if changed_to_open:
-            title, message = "TradOX", "Market is now OPEN — TradOX will resume trading"
+            title, message = "TradOX", "Market is now OPEN - TradOX will resume trading"
         else:
-            title, message = "TradOX", "Market just CLOSED — TradOX will hold until it reopens"
+            title, message = "TradOX", "Market just CLOSED - TradOX will hold until it reopens"
         notification.notify(title=title, message=message, timeout=10)
         print(f"  [notify] {message}")
     except Exception as e:
@@ -58,7 +77,7 @@ def _track_market_transition(is_open: bool):
     was_open = _load_market_state()
     _save_market_state(is_open)
     if was_open is None:
-        return  # first run — just seed the file, don't notify
+        return  # first run - just seed the file, don't notify
     if was_open != is_open:
         _notify_market_change(changed_to_open=is_open)
 
@@ -83,6 +102,35 @@ def _last_log_entries():
     return entries
 
 
+def _compute_indicators(bars: list) -> dict:
+    """Dashboard-facing technical summary for one symbol, derived from the same
+    daily bars already fetched for the LLM decision (no extra network calls).
+
+    Returns {"rsi_14", "macd_hist", "sma_trend"}: the RSI (1dp), the MACD
+    histogram (3dp, for the up/down arrow), and a short trend label derived
+    from SMA5 vs SMA20 ("above both" / "below both" / "mixed").
+    """
+    summary = build_summary(bars)
+    sma5 = summary.get("sma_5")
+    sma20 = summary.get("sma_20")
+    close = bars[-1]["close"] if bars else None
+    if sma5 is not None and sma20 is not None and close is not None:
+        if close > sma5 > sma20:
+            trend = "above both"
+        elif close < sma5 < sma20:
+            trend = "below both"
+        else:
+            trend = "mixed"
+    else:
+        trend = "mixed"
+    macd_hist = summary.get("macd_histogram")
+    return {
+        "rsi_14": round(summary["rsi_14"], 1) if summary.get("rsi_14") is not None else None,
+        "macd_hist": round(macd_hist, 3) if macd_hist is not None else None,
+        "sma_trend": trend,
+    }
+
+
 def evaluate(symbol: str, market_open: bool, last_entry=None):
     """Fetches data + gets an LLM decision for one symbol. Returns None if not enough data."""
     bars = get_recent_bars(symbol)
@@ -90,7 +138,8 @@ def evaluate(symbol: str, market_open: bool, last_entry=None):
         print(f"  {symbol}: not enough data yet, skipping.")
         return None
 
-    held = get_current_qty(get_client(), symbol)
+    position = get_position_detail(get_client(), symbol)
+    held = position["qty"]
 
     try:
         live = get_latest_price(symbol)
@@ -102,6 +151,30 @@ def evaluate(symbol: str, market_open: bool, last_entry=None):
         price_as_of = None
 
     latest_close = bars[-1]["close"]
+    indicators = _compute_indicators(bars)
+
+    # --- hard stop-loss floor: independent of the LLM ----------------------
+    # If an open position is losing more than the configured % in real time,
+    # force a SELL this scan and skip the LLM call entirely. This floor can't be
+    # overridden by the model's discretionary judgment.
+    plpc = position.get("unrealized_plpc")
+    if (held > 0
+            and plpc is not None
+            and Config.HARD_STOP_LOSS_PCT is not None
+            and plpc <= Config.HARD_STOP_LOSS_PCT):
+        decision = {
+            "action": "SELL",
+            "reason": "hard stop-loss triggered",
+            "confidence": 1.0,
+            "symbol": symbol,
+            "latest_close": latest_close,
+            "live_price": live_price,
+            "data_as_of": price_as_of,
+            "unrealized_plpc": plpc,
+        }
+        decision.update(indicators)
+        print(f"  {symbol}: HARD STOP-LOSS ({plpc:+.2f}% <= {Config.HARD_STOP_LOSS_PCT:.2f}%) - forcing SELL, skipping LLM")
+        return decision
 
     # --- change detection: skip the LLM if nothing changed since the last scan ---
     if last_entry is not None:
@@ -109,22 +182,30 @@ def evaluate(symbol: str, market_open: bool, last_entry=None):
         prev_close = last_entry.get("latest_close")
         if prev_price is not None and prev_close is not None:
             if live_price == prev_price and latest_close == prev_close:
-                return {
+                reused = {
                     "action": last_entry.get("action", "HOLD"),
-                    "reason": "unchanged since last scan — reused prior decision",
+                    "reason": "unchanged since last scan - reused prior decision",
                     "confidence": last_entry.get("confidence", 0.0),
                     "symbol": symbol,
                     "latest_close": latest_close,
                     "live_price": live_price,
                     "data_as_of": price_as_of,
+                    "unrealized_plpc": plpc,
                     "_reused": True,
                 }
+                reused.update(indicators)
+                return reused
 
-    decision = decide(symbol, bars, position_qty=held, price_as_of=price_as_of, market_open=market_open)
+    decision = decide(symbol, bars, position_qty=held,
+                      avg_entry_price=position["avg_entry_price"],
+                      unrealized_plpc=position["unrealized_plpc"],
+                      price_as_of=price_as_of, market_open=market_open)
     decision["symbol"] = symbol
     decision["latest_close"] = latest_close
     decision["live_price"] = live_price
     decision["data_as_of"] = price_as_of
+    decision["unrealized_plpc"] = plpc
+    decision.update(indicators)
     return decision
 
 
@@ -162,17 +243,19 @@ def run_scan(symbols: list, trade: bool):
         reused = r.pop("_reused", False)
 
         if reused:
-            order_id, note = None, "unchanged since last scan — reused prior decision"
+            order_id, note = None, "unchanged since last scan - reused prior decision"
         else:
             order_id, note = None, "not traded (scan-only mode)"
 
-            should_trade = trade and r.get("confidence", 0) >= Config.MIN_CONFIDENCE_TO_TRADE
+            should_trade = (not is_paused()) and trade and r.get("confidence", 0) >= Config.MIN_CONFIDENCE_TO_TRADE
             if should_trade:
                 order, note = execute(r["symbol"], r["action"], r["live_price"])
                 order_id = str(order.id) if order else None
                 print(f"\n  -> {r['symbol']}: {note}" + (f" (order {order_id})" if order_id else ""))
+            elif is_paused():
+                note = "paused - no orders placed (scanning continues)"
             elif trade:
-                note = f"below confidence floor ({Config.MIN_CONFIDENCE_TO_TRADE}) — watch only"
+                note = f"below confidence floor ({Config.MIN_CONFIDENCE_TO_TRADE}) - watch only"
 
         log_entry = {
             "timestamp": datetime.now().isoformat(),
@@ -187,11 +270,77 @@ def run_scan(symbols: list, trade: bool):
             "market_open": market_open,
             "order_id": order_id,
             "note": note,
+            "unrealized_plpc": r.get("unrealized_plpc"),
+            # Dashboard indicator columns. These are attached to every decision
+            # (including the "reused prior decision" reuse path) by evaluate(),
+            # so they carry forward correctly instead of being dropped.
+            "rsi_14": r.get("rsi_14"),
+            "macd_hist": r.get("macd_hist"),
+            "sma_trend": r.get("sma_trend"),
         }
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry) + "\n")
 
     return market
+
+
+# --- goal-of-the-day state --------------------------------------------------
+def _load_goal_state() -> dict:
+    try:
+        if os.path.exists(Config.GOAL_STATE_PATH):
+            with open(Config.GOAL_STATE_PATH, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            if isinstance(state, dict):
+                return state
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return {"goal_pct": None, "achieved": False, "date": None, "set_on": None}
+
+
+def _save_goal_state(state: dict):
+    try:
+        with open(Config.GOAL_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
+
+def set_goal(goal_pct: float):
+    """Sets today's return goal, resetting the achieved flag for a new day."""
+    state = _load_goal_state()
+    today = datetime.now().strftime("%Y-%m-%d")
+    state["goal_pct"] = float(goal_pct)
+    state["date"] = today
+    state["set_on"] = datetime.now().isoformat()
+    state["achieved"] = False
+    _save_goal_state(state)
+    return state
+
+
+def get_goal_state() -> dict:
+    return _load_goal_state()
+
+
+def liquidate_all(trade_ok: bool = True):
+    """Sells every open position (position-aware, pending-order safe).
+
+    Returns a list of {"symbol", "order_id", "note"} for the dashboard. When
+    `trade_ok` is False (paused) nothing is sold and notes explain why.
+    """
+    results = []
+    if not trade_ok:
+        for s in get_open_positions():
+            results.append({"symbol": s.get("symbol"), "order_id": None,
+                            "note": "paused - not liquidating"})
+        return results
+    for pos in get_open_positions():
+        order, note = liquidate_position(pos["symbol"])
+        results.append({
+            "symbol": pos["symbol"],
+            "order_id": str(order.id) if order else None,
+            "note": note,
+        })
+    return results
 
 
 def main():
@@ -200,12 +349,12 @@ def main():
     except (AttributeError, OSError):
         pass
 
-    parser = argparse.ArgumentParser(description="AI trading agent — scans a watchlist and recommends/trades on Alpaca paper trading")
+    parser = argparse.ArgumentParser(description="AI trading agent - scans a watchlist and recommends/trades on Alpaca paper trading")
     parser.add_argument("--symbols", default=",".join(Config.DEFAULT_WATCHLIST),
                          help="Comma-separated tickers, e.g. AAPL,MSFT,TSM")
     parser.add_argument("--loop", type=int, default=0, help="Seconds between scans. 0 = run once and exit.")
     parser.add_argument("--recommend-only", action="store_true",
-                         help="Just rank and show recommendations — never place real paper orders.")
+                         help="Just rank and show recommendations - never place real paper orders.")
     args = parser.parse_args()
 
     Config.validate()
@@ -226,7 +375,7 @@ def main():
                     now = datetime.now(next_open.tzinfo)
                     sleep_seconds = max(0, int((next_open - now).total_seconds()))
                     next_open_display = next_open.strftime("%H:%M %Z")
-                    print(f"\nMarket closed — next scan at {next_open_display} ({sleep_seconds}s from now)")
+                    print(f"\nMarket closed - next scan at {next_open_display} ({sleep_seconds}s from now)")
                     time.sleep(sleep_seconds)
             except KeyboardInterrupt:
                 print("\nStopped.")

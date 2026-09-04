@@ -3,53 +3,157 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TradOX — Decision Dashboard</title>
+  <title>TradOX — AI Trading Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
-<body data-poll="{{ poll_seconds }}" data-stale="{{ stale_minutes }}">
-<div class="wrap">
-  <header class="header">
-    <h1>TradOX — AI Trading Decision Dashboard</h1>
-    <div class="badge-row">
-      <span id="market-badge" class="badge badge-loading">Loading market…</span>
-      <span id="latest-decision" class="latest"></span>
-    </div>
-  </header>
+<body
+  data-poll="{{ poll_seconds }}"
+  data-stale="{{ stale_minutes }}"
+  data-hard-stop="{{ hard_stop_loss_pct }}"
+  data-stop-buffer="{{ stop_warning_buffer_pct }}"
+  data-max-cash-pct="{{ max_cash_pct }}"
+  data-watchlist="{{ watchlist }}">
 
-  <section class="summary-cards" id="summary-cards">
-    <div class="card"><div class="card-label">Total decisions</div><div class="card-value" id="stat-total">—</div></div>
-    <div class="card"><div class="card-label">Last BUY</div><div class="card-value" id="stat-last-buy">—</div></div>
-    <div class="card"><div class="card-label">Last SELL</div><div class="card-value" id="stat-last-sell">—</div></div>
-  </section>
+  <div class="wrap">
 
-  <section class="table-section">
-    <h2>Decision Log <span class="muted">(auto-updating)</span></h2>
-    <div class="table-scroll">
-      <table id="decision-table">
-        <thead>
-          <tr>
-            <th>Decided at</th>
-            <th>Symbol</th>
-            <th>Action</th>
-            <th>Conf</th>
-            <th>Price</th>
-            <th>Market</th>
-            <th>Data age</th>
-            <th>Order</th>
-          </tr>
-        </thead>
-        <tbody id="decision-body">
-          <tr><td colspan="8" class="empty">Loading…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
+    <!-- 1. Header: title + market pill + agent pill + pause/resume -->
+    <header class="header">
+      <div class="header-top">
+        <h1>TradOX<span class="subtitle"> — AI Trading Agent</span></h1>
+        <div class="badge-row">
+          <span id="market-badge" class="badge badge-loading">Market: loading…</span>
+          <span id="agent-badge" class="badge badge-running">Agent: Running</span>
+          <button id="pause-btn" class="btn btn-secondary" disabled>Pause</button>
+        </div>
+      </div>
+      <div id="market-times" class="market-times"></div>
+    </header>
 
-  <footer class="footer">
-    <span>Stale threshold: &gt; {{ stale_minutes }} min while market open.</span>
-  </footer>
-</div>
+    <!-- 2. Account summary cards -->
+    <section class="cards" id="account-cards">
+      <div class="card">
+        <div class="card-label">Cash</div>
+        <div class="card-value" id="acct-cash">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Portfolio Value</div>
+        <div class="card-value" id="acct-portfolio">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Buying Power</div>
+        <div class="card-value" id="acct-buying">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Total Return</div>
+        <div class="card-value" id="acct-total">—</div>
+        <div class="card-sub" id="acct-total-pct">since baseline</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Today's P/L</div>
+        <div class="card-value" id="acct-today">—</div>
+        <div class="card-sub" id="acct-today-pct">vs prior close</div>
+      </div>
+    </section>
 
-<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+    <!-- 3. Goal of the Day card -->
+    <section class="card goal-card">
+      <div class="goal-head">
+        <div class="goal-title">Goal of the Day</div>
+        <div class="goal-form">
+          <input id="goal-input" type="number" step="0.1" min="0" placeholder="Target % return">
+          <button id="goal-btn" class="btn btn-primary">Set Goal</button>
+        </div>
+      </div>
+      <div class="progress-track"><div id="goal-progress" class="progress-fill"></div></div>
+      <div class="goal-status" id="goal-status">No goal set yet.</div>
+    </section>
+
+    <!-- 4. Equity curve -->
+    <section class="table-section">
+      <h2>Equity Curve</h2>
+      <div class="chart-card"><canvas id="equity-chart"></canvas></div>
+    </section>
+
+    <!-- 5. Current Positions -->
+    <section class="table-section">
+      <h2>Current Positions</h2>
+      <div class="table-scroll">
+        <table id="positions-table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Qty</th>
+              <th>Avg Entry</th>
+              <th>Current</th>
+              <th>Market Value</th>
+              <th>Unrealized P/L</th>
+              <th>%</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="positions-body">
+            <tr><td colspan="8" class="empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 6. Latest Scan -->
+    <section class="table-section">
+      <h2>Latest Scan <span class="muted">(auto-updating)</span></h2>
+      <div class="table-scroll">
+        <table id="scan-table">
+          <thead>
+            <tr>
+              <th>Decided at</th>
+              <th>Symbol</th>
+              <th>Action</th>
+              <th>Conf</th>
+              <th>Price</th>
+              <th>Market</th>
+              <th>RSI</th>
+              <th>MACD Hist</th>
+              <th>Trend</th>
+              <th>Order</th>
+            </tr>
+          </thead>
+          <tbody id="scan-body">
+            <tr><td colspan="10" class="empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination" id="scan-pagination" hidden>
+        <span class="pg-info" id="pg-info"></span>
+        <div class="pg-controls">
+          <button class="btn btn-secondary btn-sm" id="pg-prev" disabled>← Prev</button>
+          <span class="pg-page" id="pg-page"></span>
+          <button class="btn btn-secondary btn-sm" id="pg-next" disabled>Next →</button>
+          <select id="pg-size" class="pg-size" title="Rows per page">
+            <option value="15" selected>15</option>
+            <option value="30">30</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. Strategy explainer panel -->
+    <section class="panel">
+      <h2>How the strategy works</h2>
+      <ul>
+        <li><strong>Three indicators.</strong> Each scan reads RSI, MACD, and the SMA trend (short SMA5 vs long SMA20). The agent only enters a trade when <em>at least two of the three</em> point the same way, so one noisy signal isn't enough on its own.</li>
+        <li><strong>Position sizing.</strong> A single BUY spends up to <strong>{{ max_cash_pct }}%</strong> of the available paper cash, so no one position dominates the account.</li>
+        <li><strong>Hard stop-loss.</strong> Any open position losing <strong>{{ hard_stop_loss_pct }}%</strong> or more is force-sold immediately — this floor is independent of the AI model and can't be overridden by a discretionary call.</li>
+        <li><strong>Watchlist:</strong> {{ watchlist }}.</li>
+      </ul>
+    </section>
+
+    <footer class="footer">
+      <span>Dashboard polls every {{ poll_seconds }}s. Data considered stale after &gt; {{ stale_minutes }} min while market open.</span>
+    </footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
 </body>
 </html>

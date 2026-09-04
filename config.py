@@ -16,7 +16,7 @@ class Config:
     LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
     LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 
-    # Default watchlist of large, liquid names — good signal-to-noise for a demo.
+    # Default watchlist of large, liquid names - good signal-to-noise for a demo.
     # TSM = TSMC's US-listed ADR (there's no separate "TSMC" ticker on US exchanges).
     DEFAULT_WATCHLIST = ["AAPL", "MSFT", "NVDA", "GOOGL", "TSM", "AMZN"]
 
@@ -26,6 +26,19 @@ class Config:
 
     # Max % of paper cash to risk on a single BUY (simple position sizing).
     MAX_CASH_PCT_PER_TRADE = 0.05
+
+    # Hard stop-loss floor (as % P/L): if a held position's real-time
+    # unrealized_plpc drops to this loss level or below, force a SELL regardless
+    # of what the LLM says. The model's own discretionary SELL is in addition
+    # to this floor. A value of None disables the hard stop.
+    HARD_STOP_LOSS_PCT = -8.0
+
+    # Dashboard goal-of-the-day: the progress bar is capped at 100% and the
+    # amber stop-warning badge lights up when a position is within this many
+    # percentage points of the hard stop-loss threshold.
+    GOAL_STATE_PATH = "goal_state.json"
+    BASELINE_PATH = "baseline.json"
+    STOP_WARNING_BUFFER_PCT = 2.0
 
     _PLACEHOLDER_MARKERS = ("your_", "_here", "changeme", "xxx", "example")
 

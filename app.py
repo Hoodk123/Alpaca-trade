@@ -1,13 +1,16 @@
-"""TradOX dashboard — a Flask app that serves the decision log live and runs
+"""TradOX dashboard - a Flask app that serves the decision log live and runs
 the trading scans automatically in the background.
 
 Routes:
-    GET /                    the dashboard page (serves templates/index.html)
-    GET /api/decisions       latest decision log rows as JSON
-    GET /api/market          live market status (open/closed, next open/close)
-    GET /api/refresh         append any pending decisions from the JSONL to the
-                             in-memory cache and return the count added
-    GET /healthz             simple liveness probe (for uptime pings)
+    GET  /                    the dashboard page (serves templates/index.html)
+    GET  /api/status          one payload: market, account, positions, goal,
+                              paused, latest scan rows (everything the UI needs)
+    GET  /api/market          live market status (open/closed, next open/close)
+    GET  /api/equity-history  portfolio equity over time for the chart
+    POST /liquidate/<symbol>  sell the full position in <symbol>
+    POST /api/pause           toggle the agent paused state ({"paused": bool})
+    POST /api/goal            set today's return goal ({"goal_pct": float})
+    GET  /healthz             simple liveness probe (for uptime pings)
 
 The dashboard page polls /api/decisions every few seconds, so new entries that
 the background scanner appends to logs/decisions.jsonl show up automatically.
@@ -25,13 +28,15 @@ Usage:
 import json
 import os
 import threading
+from datetime import datetime
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 from config import Config
 import agent
 from data_fetcher import get_market_status
 from strategy import age_minutes
+from broker import get_account_summary, get_open_positions, get_equity_history, liquidate_position
 
 LOG_PATH = "logs/decisions.jsonl"
 POLL_SECONDS = 5
@@ -50,7 +55,7 @@ app = Flask(__name__)
 def _ensure_state_dirs():
     """Create runtime dirs/files if missing.
 
-    Render's filesystem is ephemeral — logs/, market_state.json and any other
+    Render's filesystem is ephemeral - logs/, market_state.json and any other
     local state are wiped on every redeploy. For a hackathon demo that's fine:
     the agent just re-creates them here and re-seeds its state on the next scan.
     Anything that must survive a redeploy would need an external store instead.
@@ -120,6 +125,9 @@ def _row_view(e: dict, market_open: bool) -> dict:
         "data_age_minutes": age,
         "order_id": e.get("order_id") or "",
         "note": e.get("note", ""),
+        "rsi_14": e.get("rsi_14"),
+        "macd_hist": e.get("macd_hist"),
+        "sma_trend": e.get("sma_trend", ""),
         "stale": stale,
     }
 
@@ -137,10 +145,62 @@ def _snapshot():
     return [_row_view(e, market_open) for e in entries], market_open
 
 
+# --- baseline (Total Return) -------------------------------------------------
+def _load_baseline() -> float:
+    """Portfolio value at first run. Seeded once from the live account if absent."""
+    try:
+        if os.path.exists(Config.BASELINE_PATH):
+            with open(Config.BASELINE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("baseline"):
+                return float(data["baseline"])
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    try:
+        baseline = get_account_summary()["portfolio_value"]
+    except Exception:
+        return None
+    try:
+        with open(Config.BASELINE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"baseline": baseline, "set_on": datetime.now().isoformat()}, f)
+    except OSError:
+        pass
+    return baseline
+
+
+def _today_pl(account: dict) -> dict:
+    """Today's P/L in $ and % from account.equity vs account.last_equity."""
+    equity = account.get("equity")
+    last_equity = account.get("last_equity")
+    if equity is None or last_equity is None or last_equity == 0:
+        return {"value": None, "pct": None}
+    value = equity - last_equity
+    return {"value": round(value, 2), "pct": round(value / last_equity * 100.0, 3)}
+
+
+def _returns(account: dict) -> dict:
+    """Total Return ($ and %) since baseline.json, plus Today's P/L."""
+    baseline = _load_baseline()
+    equity = account.get("equity")
+    total = {"value": None, "pct": None}
+    if baseline and equity is not None:
+        value = equity - baseline
+        total = {"value": round(value, 2), "pct": round(value / baseline * 100.0, 3)}
+    return {"total": total, "today": _today_pl(account)}
+
+
 # --- routes ----------------------------------------------------------------
 @app.route("/")
 def index():
-    return render_template("index.html", poll_seconds=POLL_SECONDS, stale_minutes=_STALE_MINUTES)
+    return render_template(
+        "index.html",
+        poll_seconds=POLL_SECONDS,
+        stale_minutes=_STALE_MINUTES,
+        hard_stop_loss_pct=Config.HARD_STOP_LOSS_PCT,
+        max_cash_pct=Config.MAX_CASH_PCT_PER_TRADE * 100.0,
+        stop_warning_buffer_pct=Config.STOP_WARNING_BUFFER_PCT,
+        watchlist=", ".join(Config.DEFAULT_WATCHLIST),
+    )
 
 
 @app.route("/api/decisions")
@@ -149,12 +209,93 @@ def api_decisions():
     return jsonify({"count": len(views), "entries": views})
 
 
-@app.route("/api/market")
-def api_market():
+@app.route("/api/status")
+def api_status():
+    """Everything the dashboard needs in one payload. Refreshes the JSONL
+    cache first so new scan entries show up without a separate /api/refresh."""
+    with _lock:
+        added = _load_new_entries()
+        if added:
+            _cached_entries.extend(added)
+
+    views, market_open = _snapshot()
+
+    market = {"is_open": market_open, "next_open": None, "next_close": None}
     try:
-        return jsonify(get_market_status())
+        market = get_market_status()
+    except Exception:
+        pass
+
+    account = {}
+    returns = {"total": {"value": None, "pct": None}, "today": {"value": None, "pct": None}}
+    try:
+        account = get_account_summary()
+        returns = _returns(account)
+    except Exception:
+        pass
+
+    positions = []
+    try:
+        positions = get_open_positions()
+    except Exception:
+        pass
+
+    goal = agent.get_goal_state()
+    paused = agent.is_paused()
+
+    return jsonify({
+        "market": market,
+        "account": account,
+        "returns": returns,
+        "positions": positions,
+        "goal": goal,
+        "paused": paused,
+        "config": {
+            "hard_stop_loss_pct": Config.HARD_STOP_LOSS_PCT,
+            "stop_warning_buffer_pct": Config.STOP_WARNING_BUFFER_PCT,
+            "max_cash_pct_per_trade": Config.MAX_CASH_PCT_PER_TRADE,
+            "watchlist": list(Config.DEFAULT_WATCHLIST),
+        },
+        "scans": views,
+    })
+
+
+@app.route("/api/equity-history")
+def api_equity_history():
+    try:
+        points = get_equity_history()
     except Exception as e:
-        return jsonify({"error": str(e), "is_open": False}), 502
+        return jsonify({"error": str(e), "points": []}), 502
+    return jsonify({"points": points})
+
+
+@app.route("/liquidate/<symbol>", methods=["POST"])
+def api_liquidate(symbol):
+    symbol = symbol.strip().upper()
+    try:
+        order, note = liquidate_position(symbol)
+    except Exception as e:
+        return jsonify({"error": str(e), "symbol": symbol}), 502
+    return jsonify({"symbol": symbol, "order_id": str(order.id) if order else None, "note": note})
+
+
+@app.route("/api/pause", methods=["POST"])
+def api_pause():
+    data = request.get_json(silent=True) or {}
+    paused = bool(data.get("paused", not agent.is_paused()))
+    state = agent.set_paused(paused)
+    return jsonify({"paused": state})
+
+
+@app.route("/api/goal", methods=["POST"])
+def api_goal():
+    data = request.get_json(silent=True) or {}
+    try:
+        goal_pct = float(data.get("goal_pct"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "goal_pct must be a number"}), 400
+    state = agent.set_goal(goal_pct)
+    return jsonify(state)
 
 
 @app.route("/api/refresh")
@@ -165,6 +306,14 @@ def api_refresh():
         added = _load_new_entries()
         _cached_entries.extend(added)
     return jsonify({"added": len(added)})
+
+
+@app.route("/api/market")
+def api_market():
+    try:
+        return jsonify(get_market_status())
+    except Exception as e:
+        return jsonify({"error": str(e), "is_open": False}), 502
 
 
 @app.route("/healthz")

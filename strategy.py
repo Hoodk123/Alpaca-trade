@@ -70,12 +70,80 @@ def sma(values, window):
     return sum(values[-window:]) / window
 
 
+def ema(values, period):
+    """Exponential moving average over the full series (Wilder-style seeding with
+    SMA of the first `period` points). Returns None if not enough data."""
+    if len(values) < period:
+        return None
+    multiplier = 2.0 / (period + 1)
+    ema_val = sum(values[:period]) / period
+    for price in values[period:]:
+        ema_val = (price - ema_val) * multiplier + ema_val
+    return ema_val
+
+
+def rsi(closes, period=14):
+    """Relative Strength Index using Wilder's smoothing. Returns 0-100 or None."""
+    if len(closes) <= period:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, period + 1):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(period + 1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gain = max(change, 0)
+        loss = max(-change, 0)
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def macd(closes, fast=12, slow=26, signal=9):
+    """MACD line, signal line, and histogram. Returns (macd, signal, hist) or
+    (None, None, None) if there isn't enough price history (need slow+signal pts)."""
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+    if ema_fast is None or ema_slow is None:
+        return None, None, None
+    macd_line = ema_fast - ema_slow
+
+    # Signal line is an EMA of the MACD line over the points where it exists.
+    macd_series = []
+    # Recompute the MACD at each step so the signal EMA reflects the full history.
+    for i in range(len(closes)):
+        if i + 1 < slow:
+            continue
+        ef = ema(closes[: i + 1], fast)
+        es = ema(closes[: i + 1], slow)
+        if ef is not None and es is not None:
+            macd_series.append(ef - es)
+    if len(macd_series) < signal:
+        return None, None, None
+    signal_line = ema(macd_series, signal)
+    return macd_line, signal_line, macd_line - signal_line
+
+
+
 def build_summary(bars):
     closes = [b["close"] for b in bars]
+    m_line, m_signal, m_hist = macd(closes)
+    rsi_val = rsi(closes, 14)
     return {
         "latest_close": closes[-1],
         "sma_5": sma(closes, 5),
         "sma_20": sma(closes, 20),
+        "rsi_14": round(rsi_val, 2) if rsi_val is not None else None,
+        "macd": round(m_line, 3) if m_line is not None else None,
+        "macd_signal": round(m_signal, 3) if m_signal is not None else None,
+        "macd_histogram": round(m_hist, 3) if m_hist is not None else None,
         "pct_change_5d": round((closes[-1] - closes[-5]) / closes[-5] * 100, 2) if len(closes) >= 5 else None,
         "recent_closes": closes[-10:],
     }
@@ -102,7 +170,7 @@ def _call_llm_once(prompt: str):
         return None, f"Could not reach the LLM provider: {e}", False
 
     if response.status_code == 429:
-        return None, "rate limited (HTTP 429) — back off and retry", False
+        return None, "rate limited (HTTP 429) - back off and retry", False
 
     try:
         response.raise_for_status()
@@ -123,7 +191,7 @@ def _call_llm_once(prompt: str):
     finish = choices[0].get("finish_reason") if choices else None
 
     if not content:
-        return None, "LLM returned an empty response — will retry", False
+        return None, "LLM returned an empty response - will retry", False
 
     return content.strip(), None, (finish == "length")
 
@@ -143,15 +211,23 @@ def age_minutes(price_as_of) -> int:
 def _market_line(market_open: bool) -> str:
     if market_open:
         return "Market status: OPEN."
-    return "Market status: CLOSED — this is the last traded price before close, not a live quote."
+    return "Market status: CLOSED - this is the last traded price before close, not a live quote."
 
 
-def decide(symbol: str, bars: list, position_qty: int = 0,
-           price_as_of=None, market_open: bool = True) -> dict:
+def decide(symbol: str, bars: list, position_qty: int = 0, avg_entry_price: float = None,
+           unrealized_plpc: float = None, price_as_of=None, market_open: bool = True) -> dict:
     """Returns {"action": "BUY"|"SELL"|"HOLD", "reason": str, "confidence": float}
 
     `position_qty` is how many shares we currently hold (0 = none). The model is
     told this so it never suggests SELL for a stock we don't own.
+
+    `avg_entry_price` (float, optional) is the average price we bought at.
+
+    `unrealized_plpc` (float, optional) is the LIVE P/L as a % of cost basis
+    straight from Alpaca (not derived from the daily close). It's preferred for
+    the unrealized-P/L line so the model treats SELL as a real take-profit /
+    stop-loss exit. `avg_entry_price` is used only as a fallback when the live
+    P/L% is unavailable.
 
     `price_as_of` is the ISO timestamp of the live price and `market_open` tells
     the model whether the market is currently trading, so it can factor staleness
@@ -164,6 +240,22 @@ def decide(symbol: str, bars: list, position_qty: int = 0,
         if position_qty > 0
         else f"Current position: you hold NO shares of {symbol}."
     )
+
+    # Unrealized P/L on an open position, for taking profit / cutting losses.
+    # Prefer Alpaca's real-time unrealized_plpc; fall back to computing from the
+    # average entry price vs. the latest close only when the live value is absent.
+    pnl_line = ""
+    if position_qty > 0:
+        pnl_pct = unrealized_plpc
+        if pnl_pct is None and avg_entry_price:
+            pnl_pct = (bars[-1]["close"] - avg_entry_price) / avg_entry_price * 100.0
+        if pnl_pct is not None:
+            pnl_line = (
+                f"You are currently {pnl_pct:+.2f}% on this position "
+                f"({'up' if pnl_pct >= 0 else 'down'}). "
+                f"Consider whether to hold for more upside, or exit to lock in gains / limit losses. "
+                f"Treat SELL as a genuine take-profit or stop-loss decision."
+            )
 
     if price_as_of:
         age = age_minutes(price_as_of)
@@ -180,17 +272,24 @@ def decide(symbol: str, bars: list, position_qty: int = 0,
     prompt = f"""You are a cautious trading assistant operating on a PAPER (simulated) account.
 Symbol: {symbol}
 {position_line}
+{pnl_line}
 {age_line}
 {market_line}
 Recent data: {json.dumps(summary)}
+
+Indicator guide - weigh these TOGETHER, do not rely on any single one:
+- SMA: use for overall trend direction (price above SMA-20 = uptrend, below = downtrend).
+- RSI(14): above 70 = overbought (caution on new BUYs); below 30 = oversold (caution on SELLs / possible bounce).
+- MACD: histogram turning positive = bullish momentum building; turning negative = bearish momentum building. MACD above signal = momentum up, below = momentum down.
+
+Only suggest BUY when at least two of the three indicators (SMA trend, RSI, MACD) agree the setup is attractive. Prefer HOLD when they conflict.
 
 IMPORTANT:
 - SELL is only valid when you currently hold shares of {symbol}.
 - If you hold NO shares, you MUST NOT choose SELL (pick BUY or HOLD).
 - BUY is only valid when the setup is actually attractive.
-- If the market is CLOSED, treat the live price as a snapshot (last traded price
-  before close), NOT a live quote. Factor that staleness into your confidence —
-  lower your confidence when reasoning off stale or closed-market data.
+- If you hold a position, weigh SELL as a genuine risk decision using the unrealized P/L above: exit to lock in gains (take-profit) or to limit losses (stop-loss), vs. holding for more upside.
+- If the market is CLOSED, treat the latest price as a snapshot (last traded price before close), NOT a live quote. Factor that staleness into your confidence - lower your confidence when reasoning off stale or closed-market data.
 
 Respond with ONLY a compact JSON object and nothing else (no code fences, no
 explanation). Keep the "reason" under 25 words and make "confidence" a number
