@@ -31,7 +31,7 @@ import threading
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request
-
+from messaging import send_discord_message
 from config import Config
 import agent
 from data_fetcher import get_market_status
@@ -221,6 +221,14 @@ def _check_goal():
         results = agent.liquidate_all()
         print(f"[goal] today's P/L {today_pct:+.2f}% >= target {goal_pct}% - "
               f"auto-liquidated {len(results)} position(s)")
+
+        goal_msg = (
+            f"🎯**Goal Reached & Liquidated!**\n"
+            f". **Target:** `{goal_pct}%`\n"
+            f". **Today's P/L:** `{today_pct:+.2f}%`\n"
+            f". **Action:** Auto-liquidated `{len(results)}` position(s) to lock in gains."
+        )
+        send_discord_message(goal_msg)
         for r in results:
             print(f"[goal]   {r['symbol']}: {r['note']} (order {r.get('order_id')})")
 

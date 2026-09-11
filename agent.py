@@ -13,6 +13,7 @@ from config import Config
 from data_fetcher import get_recent_bars, get_latest_price, get_market_status
 from strategy import decide, age_minutes, build_summary
 from broker import execute, get_client, get_position_detail, liquidate_position, get_open_positions
+from messaging import send_discord_message
 
 LOG_PATH = "logs/decisions.jsonl"
 MARKET_STATE_PATH = "market_state.json"
@@ -63,9 +64,13 @@ def _notify_market_change(changed_to_open: bool):
         from plyer import notification
         if changed_to_open:
             title, message = "TradOX", "Market is now OPEN - TradOX will resume trading"
+            discord_msg = "🟢 ** TradOX Alert:** Market is now **OPEN** - Agent scanning & execution resumed."
         else:
             title, message = "TradOX", "Market just CLOSED - TradOX will hold until it reopens"
+            discord_msg = "🍎 ** TradOX Alert:** Market is now **CLOSED** - Agent scanning & execution resumed."
+
         notification.notify(title=title, message=message, timeout=10)
+        send_discord_message(discord_msg)
         print(f"  [notify] {message}")
     except Exception as e:
         print(f"  [notify] could not show desktop notification: {e}")
@@ -213,13 +218,19 @@ def run_scan(symbols: list, trade: bool):
     print(f"\n[{datetime.now().isoformat(timespec='seconds')}] Scanning watchlist: {', '.join(symbols)}")
 
     # Market status is the same for every symbol, so fetch it once per scan.
-    market = get_market_status()
-    market_open = market["is_open"]
-    _track_market_transition(market_open)
+    try:
+        market = get_market_status()
+        market_open = market["is_open"]
+        _track_market_transition(market_open)
+    except Exception as e:
+        print(f"[Warning] could not fetch market status from Alpaca(Server error): {e}")
+        print(f"[Warning] Defaulting market_open to True and proceeding with scan...")        
+        market_open = True
+        market = {"is_open": True, "next_close": "unknown", "next_open": "unknown"}
     if market_open:
-        print(f"  Market: OPEN | next close {market['next_close']}")
+        print(f"  Market: OPEN | next close {market.get('next_close', 'N/A')}")
     else:
-        print(f"  Market: CLOSED | next open {market['next_open']}")
+        print(f"  Market: CLOSED | next open {market.get('next_open', 'N/A')}")
 
     # Load the most recent log entry per symbol for change detection.
     last_entries = _last_log_entries()
@@ -252,6 +263,17 @@ def run_scan(symbols: list, trade: bool):
                 order, note = execute(r["symbol"], r["action"], r["live_price"])
                 order_id = str(order.id) if order else None
                 print(f"\n  -> {r['symbol']}: {note}" + (f" (order {order_id})" if order_id else ""))
+
+                # Send Discord Alert for Trade Execution
+                if order_id:
+                    trade_msg = (
+                        f"🚨 **TradeOX Trade Executed**\n"
+                        f"**Action:** `{r['action']}`\n"
+                        f"**Symbol:** `{r['symbol']}`\n"
+                        f"**Price:** `{r['live_price']}`\n"
+                        f"**Reason:** `{r['reason']}`\n"
+                    )
+                    send_discord_message(trade_msg)
             elif is_paused():
                 note = "paused - no orders placed (scanning continues)"
             elif trade:
