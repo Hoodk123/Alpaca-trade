@@ -16,6 +16,12 @@ class Config:
     LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
     LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 
+    # Dashboard auth wall (HTTP Basic Auth). Set BOTH to lock the dashboard
+    # behind a login prompt (do this in production / on Render). Leave either
+    # unset for local dev and the dashboard stays open.
+    AUTH_USERNAME = os.getenv("AUTH_USERNAME")
+    AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
+
     # Default watchlist of large, liquid names - good signal-to-noise for a demo.
     # TSM = TSMC's US-listed ADR (there's no separate "TSMC" ticker on US exchanges).
     DEFAULT_WATCHLIST = ["AAPL", "MSFT", "NVDA", "GOOGL", "TSM", "AMZN"]
