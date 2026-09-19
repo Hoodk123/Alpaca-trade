@@ -82,6 +82,23 @@ with no page reload. It includes:
 Backend safety behavior is untouched by the UI: position-aware sells, cash
 sizing, the hard stop-loss floor, and the confidence threshold all still apply.
 
+## Lock the dashboard behind a login (recommended for the public demo)
+
+Without this, anyone who finds your Render URL can view your account and even
+liquidate positions or pause the agent. Set both env vars and every route
+except `/healthz` requires HTTP Basic Auth (browser shows a login prompt):
+
+```bash
+AUTH_USERNAME=your_dashboard_user
+AUTH_PASSWORD=your_strong_password_here   # pick something long
+```
+
+- Local dev: leave them unset and the dashboard stays open.
+- Render: fill in `AUTH_USERNAME` / `AUTH_PASSWORD` on the dashboard
+  (`render.yaml` already lists them) and redeploy.
+- `/healthz` stays public on purpose so uptime pings keep the free instance
+  awake.
+
 ## Deploy to Render (persistent web service)
 TradOX is ready to deploy as a Render web service using the native Python
 buildpack — no Docker/CI needed.
@@ -90,7 +107,8 @@ buildpack — no Docker/CI needed.
 2. In Render, **New → Blueprint** and connect the repo. `render.yaml` is picked
    up automatically and pre-creates a `web` service.
 3. Fill in the env vars Render lists for you (the values are never in the repo):
-   `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `LLM_API_KEY` (optional overrides:
+   `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `LLM_API_KEY`,
+   `AUTH_USERNAME`, `AUTH_PASSWORD` (optional overrides:
    `LLM_MODEL`, `LLM_BASE_URL`, `LLM_MAX_TOKENS`, `LOOP_INTERVAL_SECONDS`,
    `TRADE_ON_SCAN`, `SCHEDULE_ENABLED`).
 4. Deploy. Render runs `gunicorn app:app --workers 1 --timeout 120`

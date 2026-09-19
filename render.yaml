@@ -37,3 +37,10 @@ services:
         value: "300"
       - key: TRADE_ON_SCAN
         value: "true"   # keep the auto-scan demo in recommend-only mode by default
+
+      # --- Dashboard auth wall (HTTP Basic Auth) ---
+      # Set BOTH to lock the public demo behind a login prompt.
+      - key: AUTH_USERNAME
+        sync: false
+      - key: AUTH_PASSWORD
+        sync: false

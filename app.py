@@ -25,6 +25,7 @@ Usage:
     uv run python app.py          # local: serves on http://127.0.0.1:5000
     gunicorn app:app --workers 1  # production (Render)
 """
+import hmac
 import json
 import os
 import threading
@@ -231,6 +232,45 @@ def _check_goal():
         send_discord_message(goal_msg)
         for r in results:
             print(f"[goal]   {r['symbol']}: {r['note']} (order {r.get('order_id')})")
+
+
+# --- auth wall (HTTP Basic Auth) -------------------------------------------
+# Set AUTH_USERNAME + AUTH_PASSWORD (see config.py) to lock the whole
+# dashboard behind a login prompt. Leave either unset and every route stays
+# open (handy for local dev). /healthz is always public so uptime pings keep
+# the free Render instance awake.
+def _auth_enabled() -> bool:
+    return bool(Config.AUTH_USERNAME and Config.AUTH_PASSWORD)
+
+
+def _credentials_valid(auth) -> bool:
+    """Constant-time check of the Basic Auth credentials, if any were sent."""
+    if not auth or not auth.username or not auth.password:
+        return False
+    try:
+        user_ok = hmac.compare_digest(auth.username, Config.AUTH_USERNAME)
+        pass_ok = hmac.compare_digest(auth.password, Config.AUTH_PASSWORD)
+    except (TypeError, AttributeError):
+        return False
+    return user_ok and pass_ok
+
+
+def _unauthorized():
+    resp = jsonify({"error": "authentication required"})
+    resp.status_code = 401
+    resp.headers["WWW-Authenticate"] = 'Basic realm="TradOX"'
+    return resp
+
+
+@app.before_request
+def _require_auth():
+    if request.path == "/healthz":
+        return None
+    if not _auth_enabled():
+        return None
+    if not _credentials_valid(request.authorization):
+        return _unauthorized()
+    return None
 
 
 # --- routes ----------------------------------------------------------------
