@@ -55,6 +55,8 @@ uv run python app.py                 # starts the web app AND the scan loop
 the CLI uses, every `LOOP_INTERVAL_SECONDS` (default 900s = 15 min), in
 recommend-only mode by default. Set `TRADE_ON_SCAN=true` to let it place orders.
 
+How comes the things are not working!!!! and the reason we doing this let's get some contribution of today right?
+
 The dashboard polls `/api/status` automatically, so new scan results show up
 with no page reload. It includes:
 
